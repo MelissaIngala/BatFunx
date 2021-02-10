@@ -1,0 +1,532 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2512
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\margl1440\margr1440\vieww10800\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 ################ QIIME2 Analysis of all bat microbiomes #########\
+####### ingala.melissar@gmail.com\
+####### last update: 7 Januray 2021\
+\
+############################ DATA PRE-PROCESSING #############################\
+#####LUTZ ET AL 2019 DATA, downloaded from QIITA\
+\
+conda activate qiime2-2019.10\
+\
+######NOTE: DADA2 developers recommend performing DADA2 on each dataset individually and\
+#then combining those outputs into a single feature table, so that's what we will do here.\
+\
+#Lutz data first, fastq manifest format\
+#awk around a bit to create the fastq manifest from file paths in directory\
+\
+find raw_data / > manifest.txt \
+awk -F/ '\{ print $8\}' manifest.txt | cut -f 2-5 -d '.' > names.txt\
+paste  names.txt manifest.txt | column -s $'\\t' -t > LutzData_Manifest.txt \
+\
+#Importing Lutz data as single-end manifest  \
+qiime tools import \\\
+  --type 'SampleData[SequencesWithQuality]' \\\
+  --input-path /home/mingala/array1/BigBatProj/LutzData/LutzData_Manifest.txt \\\
+  --output-path Lutz-single-end-demux.qza \\\
+  --input-format SingleEndFastqManifestPhred33V2\
+  \
+qiime demux summarize \\\
+	--i-data Lutz-single-end-demux.qza \\\
+	--o-visualization Lutz-demux-paired-end.qzv\
+\
+#These data appear pre-cleaned so don\'92t trim or truncate further\
+qiime dada2 denoise-single \\\
+  --i-demultiplexed-seqs Lutz-single-end-demux.qza \\\
+  --p-trim-left 0 \\\
+  --p-trunc-len 0 \\\
+  --o-representative-sequences Lutz-rep-seqs-dada2.qza \\\
+  --o-table Lutz-table-dada2.qza \\\
+  --o-denoising-stats Lutz-stats-dada2.qza\
+  \
+qiime feature-table summarize \\\
+  --i-table Lutz-table-dada2.qza  \\\
+  --o-visualization Lutz-table.qzv \\\
+  --m-sample-metadata-file FINAL_matchedmetadata.txt \
+  \
+qiime metadata tabulate \\\
+  --m-input-file Lutz-stats-dada2.qza \\\
+  --o-visualization Lutz-stats-dada2.qzv\
+  \
+############################# Generate Phylogenetic Tree ############################\
+qiime phylogeny align-to-tree-mafft-fasttree \\\
+  --i-sequences Lutz-rep-seqs-dada2.qza \\\
+  --o-alignment aligned-rep-seqs.qza \\\
+  --o-masked-alignment masked-aligned-rep-seqs.qza \\\
+  --o-tree unrooted-tree.qza \\\
+  --o-rooted-tree rooted-tree.qza\
+  \
+############################ Core Diversity Metrics##################################\
+qiime diversity core-metrics-phylogenetic \\\
+  --i-phylogeny rooted-tree.qza \\\
+  --i-table Lutz-table-dada2.qza \\\
+  --p-sampling-depth 20000 \\\
+  --m-metadata-file FINAL_matchedmetadata.txt \\\
+  --output-dir core-metrics-results\
+\
+########################## Alpha Rarefaction Plot ###################################\
+qiime diversity alpha-rarefaction \\\
+  --i-table Lutz-table-dada2.qza \\\
+  --i-phylogeny rooted-tree.qza \\\
+  --p-max-depth 20000 \\\
+  --m-metadata-file FINAL_matchedmetadata.txt \\\
+  --o-visualization alpha-rarefaction.qzv\
+  \
+############################ Taxonomic Assignment & Summary ######################\
+#### Will use newly trained Naive Bayesian q2 classifier, SILVA ribosomal database\
+\
+#Downloaded pre-trained 16S 515F-806R SILVA classifier\
+####WARNING:These classifiers were trained using scikit-learn 0.20.2, and therefore can only be used with scikit-learn 0.20.2\
+conda install --override-channels -c defaults scikit-learn=0.21.2\
+\
+###WARNING: This is a huge ref file, so if you're running this over a shared cluster with user-limited #storage, you may need to export your TMPDIR environmental variable to a place with more storage. #Otherwise, the command may fail due to memory limits. Note that trying to get around this by #running over network attached storage may produce a race condition error. \
+\
+qiime feature-classifier classify-sklearn \\\
+  --i-classifier silva-132-99-515-806-nb-classifier.qza\\\
+  --i-reads Lutz-rep-seqs-dada2.qza \\\
+  --o-classification Lutz-SILVA-16S-taxonomy.qza\
+  \
+qiime taxa barplot \\\
+--i-table Lutz-table-dada2.qza \\\
+--i-taxonomy Lutz-SILVA-16S-taxonomy.qza  \\\
+--m-metadata-file FINAL_matchedmetadata.txt \\\
+--o-visualization 16S_taxonomic_barplot.qzv\
+\
+##################### FILTERING ALL DATA FOR MITOCHONDRIA AND CHLOROPLASTS ###\
+#LutzData\
+#filter out those samples without phylum level annotation and remove mito/chloro at once\
+qiime taxa filter-table \\\
+  --i-table Lutz-table-dada2.qza  \\\
+  --i-taxonomy Lutz-SILVA-full-16S-taxonomy.qza \\\
+  --p-include "p__"\\\
+  --p-exclude "mitochondria","chloroplast"\\\
+  --o-filtered-table Lutz-16S-filtered-table.qza\
+\
+qiime taxa barplot \\\
+--i-table  Lutz-16S-filtered-table.qza  \\\
+--i-taxonomy Lutz-SILVA-full-16S-taxonomy.qza  \\\
+--m-metadata-file FINAL_matchedmetadata.txt \\\
+--o-visualization 16S_FILTERED_barplot.qzv\
+\
+#filter out samples with less than 10 features identified. A subset of samples have large proportion of #mostly unassigned below Bacteria. We want to filter those samples because they will not be useful #for PICRUSt.\
+qiime feature-table filter-samples \\\
+  --i-table Lutz-16S-filtered-table.qza \\\
+  --p-min-features 10 \\\
+  --o-filtered-table Lutz-nomitochlorounknown-feature-contingency-filtered-table.qza\
+\
+#####################DUNBAR DATA FROM BELIZE \'9216 AND \'9217 ######################\
+ \
+#Import Data (11/27)\
+#I uploaded the gzipped JOINED sequences.fastq.gz file, plus the barcodes.fastq.gz extracted using QIIME's extract_barcodes.py\
+#Barcodes and seqs must be in same order or will not work!\
+#Dunbar_raw_data contains both read files and barcodes.fastq\
+qiime tools import \\\
+  --type EMPSingleEndSequences \\\
+  --input-path /home/mingala/array1/dunbar/Dunbar_raw_data \\\
+  --output-path emp-single-end-sequences.qza\
+\
+### STEP 1: Demultiplex the sequences\
+qiime demux emp-single \\\
+  --i-seqs emp-single-end-sequences.qza \\\
+  --m-barcodes-file /home/mingala/array1/dunbar/dunbar_metadata.txt \\\
+  --m-barcodes-category BarcodeSequence \\\
+  --o-per-sample-sequences dunbar-demux.qza\
+qiime demux summarize \\\
+  --i-data dunbar-demux.qza \\\
+  --o-visualization dunbar-demux.qzv\
+  \
+### STEP 2: Quality filter seqs using DADA2\
+#This step denoises, filters by q score, checks for chimeric sequences, joins reads\
+#I made a PBS script (DADA2_qsub.sh) to do this on Cuvier, takes about 3 hours\
+qiime dada2 denoise-single \\\
+  --i-demultiplexed-seqs /home/mingala/array1/dunbar/Dunbar_results/dunbar-demux.qza \\\
+  --p-trim-left 20 \\\
+  --p-trunc-len 200 \\\
+  --o-representative-sequences rep-seqs-dada2.qza \\\
+  --o-table table-dada2.qza\
+  \
+#output is rep-seqs-dada2.qza and table-dada2.qza\
+#If using these, rename them:\
+mv rep-seqs-dada2.qza rep-seqs.qza\
+mv table-dada2.qza table.qza\
+\
+#STEP 3: Feature Table Summaries\
+qiime feature-table summarize \\\
+  --i-table table.qza \\\
+  --o-visualization table.qzv \\\
+  --m-sample-metadata-file /home/mingala/array1/dunbar/dunbar_metadata.txt\
+qiime feature-table tabulate-seqs \\\
+  --i-data rep-seqs.qza \\\
+  --o-visualization rep-seqs.qzv\
+  \
+#STEP 4: Align Seqs & Build a Phylogeny of 16S Reads\
+#MAFFT alignment\
+qiime alignment mafft \\\
+  --i-sequences rep-seqs.qza \\\
+  --o-alignment aligned-rep-seqs.qza\
+#Mask to filter noise\
+qiime alignment mask \\\
+  --i-alignment aligned-rep-seqs.qza \\\
+  --o-masked-alignment masked-aligned-rep-seqs.qza\
+#Build phylogeny\
+qiime phylogeny fasttree \\\
+  --i-alignment masked-aligned-rep-seqs.qza \\\
+  --o-tree unrooted-tree.qza\
+#Root phylogeny at midpoint\
+qiime phylogeny midpoint-root \\\
+  --i-tree unrooted-tree.qza \\\
+  --o-rooted-tree dunbar-rooted-tree.qza\
+\
+#STEP 5: Create Alpha diversity rarefaction plots\
+#This step will help you determine sampling depth for downstream analyses\
+qiime diversity alpha-rarefaction \\\
+  --i-table table.qza \\\
+  --i-phylogeny dunbar-rooted-tree.qza \\\
+  --p-max-depth 1000 \\\
+  --m-metadata-file /home/mingala/array1/dunbar/dunbar_metadata.txt \\\
+  --o-visualization 1Kalpha-rarefaction.qzv\
+qiime diversity alpha-rarefaction \\\
+  --i-table table.qza \\\
+  --i-phylogeny dunbar-rooted-tree.qza \\\
+  --p-max-depth 50000 \\\
+  --m-metadata-file /home/mingala/array1/dunbar/dunbar_metadata.txt \\\
+  --o-visualization 50Kalpha-rarefaction.qzv\
+#50,000 plateaus for all species\
+\
+#STEP 6: Run Core Diversity Analyses\
+qiime diversity core-metrics-phylogenetic \\\
+  --i-phylogeny dunbar-rooted-tree.qza \\\
+  --i-table table.qza \\\
+  --p-sampling-depth 50000 \\\
+  --m-metadata-file /home/mingala/array1/dunbar/dunbar_metadata.txt \\\
+  --output-dir dunbar-core-metrics-results\
+\
+#STEP 7: Taxonomic Analysis Barplots\
+qiime feature-classifier classify-sklearn \\\
+  --i-classifier /home/mingala/array1/results/silva-132-99-515-806-nb-classifier.qza \\\
+  --i-reads rep-seqs.qza \\\
+  --o-classification taxonomy.qza\
+qiime metadata tabulate \\\
+  --m-input-file taxonomy.qza \\\
+  --o-visualization taxonomy.qzv\
+qiime taxa barplot \\\
+  --i-table table.qza \\\
+  --i-taxonomy taxonomy.qza \\\
+  --m-metadata-file /home/mingala/array1/dunbar/dunbar_metadata.txt \\\
+  --o-visualization dunbar-taxa-bar-plots.qzv\
+\
+#STEP 8: FILTER MITO, CHLORO, UNASSIGNED PHYLA\
+qiime taxa filter-table \\\
+  --i-table Dunbar_table.qza  \\\
+  --i-taxonomy taxonomy.qza \\\
+  --p-include "p__"\\\
+  --p-exclude "mitochondria","chloroplast"\\\
+  --o-filtered-table Dunbar-16S-filtered-table.qza\
+\
+qiime taxa barplot \\\
+--i-table Dunbar-16S-filtered-table.qza  \\\
+--i-taxonomy taxonomy.qza \\\
+--m-metadata-file Dunbar_mapping.txt \\\
+--o-visualization Dunbar16S_FILTERED_barplot.qzv \
+\
+#########EXPORT DATA USING QIIME TOOLS EXPORT, ANNOTATED W/ TAXONOMY\
+\
+##################### INGALA et al 2019 VAMPIRES ######################\
+######Import files (already demux with F & R fastq for each sample)\
+gzip /home/mingala/array1/Vamps/raw_data/fastq/*\
+qiime tools import \\\
+  --type 'SampleData[PairedEndSequencesWithQuality]' \\\
+  --input-path Manifest.csv \\\
+  --output-path paired-end-demux.qza \\\
+  --input-format PairedEndFastqManifestPhred33\
+  \
+#Upload metadata as TSV for viewing as an artifact:\
+#Passed Keemei validation\
+qiime metadata tabulate \\\
+  --m-input-file Vamps_metadataFULL.txt \\\
+  --o-visualization Vamps-sample-metadata.qzv\
+#You can download metadata as a .tsv; this will be helpful for Step #3\
+#Validated with Keemei....all formatted correctly\
+\
+#Summarize and view imported sequences (visualizes quality scores etc) \
+\
+qiime demux summarize --i-data paired-end-demux.qza --o-visualization Vamps-demux-summary.qzv\
+\
+###trim left on F and R reads, retain most of the length for proper amount of overlap during joining reads in DADA2 \
+\
+########### Sequence QC and Feature Table Generation\
+#Do this step using the PBS scheduler (it's only fair)\
+\
+qiime dada2 denoise-paired \\\
+  --i-demultiplexed-seqs paired-end-demux.qza \\\
+  --p-trim-left-f 36 \\\
+  --p-trim-left-r 36 \\\
+  --p-trunc-len-f 0 \\\
+  --p-trunc-len-r 0 \\\
+  --o-table Vamps-table.qza \\\
+  --o-representative-sequences Vamps-rep-seqs.qza \\\
+  --o-denoising-stats Vamps-denoising-stats.qza\
+  \
+##### Summarize feature table\
+qiime feature-table summarize \\\
+  --i-table Vamps-table.qza \\\
+  --o-visualization Vamps-table.qzv \\\
+  --m-sample-metadata-file Vamps_metadataFULL.txt\
+qiime feature-table tabulate-seqs \\\
+  --i-data Vamps-rep-seqs.qza \\\
+  --o-visualization Vamps-rep-seqs.qzv\
+  \
+#### Generate 16S Phylogeny\
+qiime phylogeny align-to-tree-mafft-fasttree \\\
+  --i-sequences Vamps-rep-seqs.qza \\\
+  --o-alignment Vamps-aligned-rep-seqs.qza \\\
+  --o-masked-alignment Vamps-masked-aligned-rep-seqs.qza \\\
+  --o-tree unrooted-tree.qza \\\
+  --o-rooted-tree rooted-tree.qza\
+  \
+#Rarefaction analysis\
+qiime diversity alpha-rarefaction \\\
+  --i-table Vamps-table.qza \\\
+  --i-phylogeny rooted-tree.qza \\\
+  --p-max-depth 10000 \\\
+  --m-metadata-file Vamps_metadataFULL.txt \\\
+  --o-visualization Vamps-alpha-rarefaction.qzv\
+  #determined sampling depth = 10000 based on rarefaction & demux summary\
+\
+#####Core diversity metrics\
+qiime diversity core-metrics-phylogenetic \\\
+  --i-phylogeny rooted-tree.qza \\\
+  --i-table Vamps-table.qza \\\
+  --p-sampling-depth 2500 \\\
+  --m-metadata-file Vamps_metadataFULL.txt \\\
+  --output-dir Vamps-core-metrics-results\
+  \
+#Alpha diversity significance tests\
+qiime diversity alpha-group-significance \\\
+  --i-alpha-diversity Vamps-core-metrics-results/faith_pd_vector.qza \\\
+  --m-metadata-file Vamps_metadataFULL.txt \\\
+  --o-visualization Vamps-core-metrics-results/faith-pd-group-significance.qzv\
+\
+qiime diversity alpha-group-significance \\\
+  --i-alpha-diversity Vamps-core-metrics-results/evenness_vector.qza \\\
+  --m-metadata-file Vamps_metadataFULL.txt \\\
+  --o-visualization Vamps-core-metrics-results/evenness-group-significance.qzv\
+\
+##########Taxonomic Analysis  \
+#Using pre-trained SILVA database, 515F 806R 16S seqs\
+qiime feature-classifier classify-sklearn \\\
+--i-classifier silva-132-99-515-806-nb-classifier.qza \\\
+--i-reads Vamps-rep-seqs.qza \\\
+--o-classification Vamps_SILVAtaxonomy.qza  \
+  \
+qiime taxa barplot \\\
+--i-table Vamps-table.qza \\\
+--i-taxonomy Vamps_SILVAtaxonomy.qza  \\\
+--m-metadata-file Vamps_metadataFULL.txt \\\
+--o-visualization Vamps-SILVAtaxa-bar-plots.qzv\
+\
+#######Export Feature Data to Taxonomy annotated BIOM\
+qiime tools export --input-path /home/mingala/array1/Vamps/Vamps-table.qza --output-path exported\
+qiime tools export --input-path home/mingala/array1/Vamps/Vamps_SILVAtaxonomy.qza --output-path exported\
+\
+cp exported/taxonomy.tsv biom-taxonomy.tsv\
+\
+cp SILVAtaxonomy.tsv SILVAbiom-taxonomy.tsv\
+\
+#change the header to OTUID, taxonomy, confidence\
+\
+#export with taxonomy\
+\
+biom add-metadata -i feature-table.biom -o table-with-SILVAtaxonomy.biom -m Vamps_metadataFULL.txt --observation-metadata-fp SILVAbiom-taxonomy.tsv\
+\
+#################### INGALA BELIZE 2018 16S DATA ###########################\
+\
+######Import files (mine are demux with F & R fastq for each sample)\
+qiime tools import \\\
+  --type 'SampleData[PairedEndSequencesWithQuality]' \\\
+  --input-path /home/mingala/array1/BZ18/Ingala_BZ2018 \\\
+  --source-format CasavaOneEightSingleLanePerSampleDirFmt \\\
+  --output-path BZ18demux-paired-end.qza\
+  \
+#Upload metadata as TSV for viewing as an artifact:\
+qiime metadata tabulate \\\
+  --m-input-file BZ18_mapping.txt \\\
+  --o-visualization tabulated-sample-metadata.qzv\
+#You can download metadata as a .tsv; this will be helpful for Step #3\
+#Validated with Keemei....all formatted correctly\
+\
+#Summarize and view imported sequences (visualizes quality scores etc) \
+\
+qiime demux summarize --i-data BZ18demux-paired-end.qza --o-visualization BZ18demux-summary.qzv\
+\
+###trim left on F and R reads, retain most of the length for proper amount of overlap during joining reads in DADA2 \
+\
+########### Sequence QC and Feature Table Generation\
+#Do this step using the PBS scheduler (it's only fair)\
+\
+qiime dada2 denoise-paired \\\
+  --i-demultiplexed-seqs BZ18demux-single-end.qza \\\
+  --p-trim-left-f 36 \\\
+  --p-trim-left-r 36 \\\
+  --p-trunc-len-f 0 \\\
+  --p-trunc-len-r 0 \\\
+  --o-table BZ18table.qza \\\
+  --o-representative-sequences BZ18rep-seqs.qza \\\
+  --o-denoising-stats BZ18denoising-stats.qza\
+  \
+##### Summarize feature table\
+qiime feature-table summarize \\\
+  --i-table BZ18table.qza \\\
+  --o-visualization BZ18table.qzv \\\
+  --m-sample-metadata-file BZ18_mapping.txt\
+qiime feature-table tabulate-seqs \\\
+  --i-data BZ18rep-seqs.qza \\\
+  --o-visualization BZ18rep-seqs.qzv\
+  \
+#### Generate 16S Phylogeny\
+qiime phylogeny align-to-tree-mafft-fasttree \\\
+  --i-sequences BZ18rep-seqs.qza \\\
+  --o-alignment BZ18aligned-rep-seqs.qza \\\
+  --o-masked-alignment BZ18masked-aligned-rep-seqs.qza \\\
+  --o-tree unrooted-tree.qza \\\
+  --o-rooted-tree rooted-tree.qza\
+  \
+#Rarefaction analysis\
+qiime diversity alpha-rarefaction \\\
+  --i-table BZ18table.qza \\\
+  --i-phylogeny rooted-tree.qza \\\
+  --p-max-depth 4000 \\\
+  --m-metadata-file BZ18_mapping.txt \\\
+  --o-visualization alpha-rarefaction.qzv\
+  #determined sampling depth = 2500 based on rarefaction & demux summary\
+\
+#####Core diversity metrics\
+qiime diversity core-metrics-phylogenetic \\\
+  --i-phylogeny rooted-tree.qza \\\
+  --i-table BZ18table.qza \\\
+  --p-sampling-depth 2500 \\\
+  --m-metadata-file BZ18_mapping.txt \\\
+  --output-dir BZ18core-metrics-results\
+  \
+#Alpha diversity significance tests\
+qiime diversity alpha-group-significance \\\
+  --i-alpha-diversity BZ18core-metrics-results/faith_pd_vector.qza \\\
+  --m-metadata-file BZ18_mapping.txt \\\
+  --o-visualization BZ18core-metrics-results/faith-pd-group-significance.qzv\
+\
+qiime diversity alpha-group-significance \\\
+  --i-alpha-diversity BZ18core-metrics-results/evenness_vector.qza \\\
+  --m-metadata-file BZ18_mapping.txt \\\
+  --o-visualization BZ18core-metrics-results/evenness-group-significance.qzv\
+  \
+#Beta diversity tests\
+qiime diversity beta-group-significance \\\
+  --i-distance-matrix BZ18core-metrics-results/unweighted_unifrac_distance_matrix.qza \\\
+  --m-metadata-file BZ18_mapping.txt \\\
+  --m-metadata-column Feeding\\ Niche \\\
+  --o-visualization BZ18core-metrics-results/unweighted-unifrac-diet-significance.qzv \\\
+  --p-pairwise\
+#significant differences in beta diversity but not alpha diversity by diet but not alpha diversity.\
+\
+##########Taxonomic Analysis\
+#Using pre-trained SILVA database, full length 16S seqs\
+qiime feature-classifier classify-sklearn \\\
+  --i-classifiersilva-132-99-full-nb-classifier.qza \\\
+  --i-reads BZ18rep-seqs.qza \\\
+  --o-classification BZ18taxonomy.qza\
+  \
+  qiime taxa barplot \\\
+  --i-table BZ18table.qza \\\
+  --i-taxonomy taxonomy.qza \\\
+  --m-metadata-file BZ18_mapping.txt \\\
+  --o-visualization taxa-bar-plots.qzv\
+  \
+#Using pre-trained SILVA database, full length 16S seqs\
+qiime feature-classifier classify-sklearn \\\
+--i-classifier SILVA_test/silva-132-99-nb-classifier.qza \\\
+--i-reads BZ18rep-seqs.qza \\\
+--o-classification home/mingala/nas1/BZ18_SILVAtaxonomy.qza  \
+  \
+qiime taxa barplot \\\
+  --i-table /home/mingala/nas1/SILVA_test/BZ18table.qza \\\
+  --i-taxonomy SILVAtaxonomy.qza \\\
+  --m-metadata-file /home/mingala/nas1/SILVA_test/BZ18_mapping.txt \\\
+  --o-visualization SILVAtaxa-bar-plots.qzv\
+\
+########filter mito, chloro, unassigned phyla\
+qiime taxa filter-table \\\
+  --i-table BZ18table.qza \\\
+  --i-taxonomy  SILVAtaxonomy.qza \\\
+  --p-include "p__" \\\
+  --p-exclude "mitochondria","chloroplast" \\\
+  --o-filtered-table BZ18table-no-mitochondria.qza\
+  \
+qiime taxa barplot \\\
+--i-table BZ18table-no-mitochondria.qza \\\
+--i-taxonomy  SILVAtaxonomy.qza \\\
+--m-metadata-file BZ18_mapping.txt \\\
+--o-visualization Ingala16S_filtered_barplot.qzv\
+\
+  \
+#######Export Feature Data to Taxonomy annotated BIOM\
+qiime tools export --input-path /home/mingala/nas1/SILVA_test/BZ18table-no-mitochondria.qza --output-path exported\
+qiime tools export --input-path SILVAtaxonomy.qza --output-path exported\
+\
+cp exported/taxonomy.tsv biom-taxonomy.tsv\
+\
+cp SILVAtaxonomy.tsv SILVAbiom-taxonomy.tsv\
+\
+#change the header to OTUID, taxonomy, confidence\
+\
+#export with taxonomy\
+\
+biom add-metadata -i feature-table.biom -o table-with-SILVAtaxonomy.biom -m /home/mingala/nas1/SILVA_test/BZ18_mapping.txt --observation-metadata-fp SILVAbiom-taxonomy.tsv\
+\
+################# MERGE FILTERED FEATURE TABLES AND REP SEQS ########################\
+#renamed some files here to keep the datasets straight\
+qiime feature-table merge --i-tables BZ18table-no-mitochondria.qza Dunbar-16S-filtered-table.qza Lutz-nomitochlorounknown-feature-contingency-filtered-table.qza Vamps-filtered-table.qza --o-merged-table merged-table-bats\
+ \
+#renamed some files here to keep the datasets straight\
+qiime feature-table merge-seqs \\\
+  --i-data BZ18rep-seqs.qza \\\
+  --i-data Dunbar_rep-seqs.qza \\\
+  --i-data Lutz-rep-seqs-dada2.qza \\\
+  --i-data Vamps-rep-seqs.qza \\\
+  --o-merged-data merged-rep-seqs.qza\
+  \
+#renamed some files here to keep the datasets straight\
+qiime feature-table merge-taxa \\\
+  --i-data Ingala-taxonomy.qza \\\
+  --i-data Dunbar-tax.qza \\\
+  --i-data Lutz-SILVA-16S-taxonomy.qza \\\
+  --i-data Vamps_SILVAtaxonomy.qza \\\
+  --o-merged-data merged-tax.qza\
+  \
+#########RUN PICRUST ON MERGED FEATURE TABLES###############\
+qiime picrust2 full-pipeline \\\
+   --i-table merged-table-bats.qza \\\
+   --i-seq merged-rep-seqs.qza \\\
+   --output-dir merged-q2-picrust2_output \\\
+   --p-threads 4 \\\
+   --p-hsp-method mp \\\
+   --p-max-nsti 2 \\\
+   --verbose\
+   \
+qiime feature-table summarize \\\
+   --i-table merged-q2-picrust2_output/pathway_abundance.qza \\\
+   --o-visualization merged_pathway_abundance.qzv\
+   \
+qiime tools export \\\
+   --input-path merged-q2-picrust2_output/pathway_abundance.qza \\\
+   --output-path merge_pathabun_exported\
+\
+cd merge_pathabun_exported/  \
+#add sample metadata\
+\
+biom add-metadata -i  feature-table.biom -o merged-taxtable.w_smd.biom --observation-metadata-fp merged-tax.qza --sample-metadata-fp Master_Metadata.txt\
+}
