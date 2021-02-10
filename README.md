@@ -1,0 +1,7 @@
+# BatFunx
+
+Abstract: Animals evolved in a microbial world, and their gut microbial symbionts have played a role in their ecological diversification. While many recent studies have reported patterns of co-diversification of hosts and their gut microbes, few studies have directly examined the functional contributions of these microbes to the dietary habits of their hosts. Here, we examined functional enrichment of gut bacteria across 545 bats belonging to 60 species and five terrestrial feeding niches. We found that host of different dietary niches had differential enrichment of bacterial functions that may be adaptive to and/or for their respective diets, and that metagenome functions were highly predictive of host feeding niche. We found no evidence of host phylogenetic effect on gut metagenome composition, suggesting that diet overrides host evolutionary history in driving functional pathways in the bat gut metagenome. Our study indicates that bats may rely on their gut microbes to contribute critical metabolic pathways, including essential amino acid synthesis, fatty acid biosynthesis, and the generation of cofactors and vitamins essential for proper nutrition.
+
+Repository Info:
+
+This repository contains code used to generate the results and figures of this paper. It is broken into two major parts: 1) the QIIME2 workflow, and 2) the R workflow where most statistics and all figures were generated.
