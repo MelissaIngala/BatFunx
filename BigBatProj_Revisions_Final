@@ -1,0 +1,300 @@
+#source('http://bioconductor.org/biocLite.R')
+#biocLite('phyloseq')
+library(phyloseq)
+#packageVersion("phyloseq")
+library("ggplot2")
+#packageVersion("ggplot2")
+library(vegan)
+#install.packages("picante")
+library(picante)
+library(ape)
+#install.packages("devtools") # if not already installed
+library("devtools")
+#devtools::install_github("biomformat", "joey711")
+library(biomformat)
+library(wesanderson)
+library(viridis)
+
+#Import the BIOM file, tree, mapping file
+dat <- read_biom(biom_file = "~/Downloads/merged-table.w_smd.biom")
+otu_table <- as.data.frame(as.matrix(biom_data(dat)))
+taxonomy <- observation_metadata(dat)
+metadata <- sample_metadata(dat)
+
+#Import to phyloseq obj
+SAM<-sample_data(metadata)
+TAX<-tax_table(as.matrix(taxonomy))
+OTU<- otu_table(otu_table, taxa_are_rows=TRUE)
+physeq<-merge_phyloseq(OTU, TAX, SAM)
+colnames(tax_table(physeq))<-"MetaCyc_pathway"
+
+#Relative abundance
+#Calculate Relative Abundance
+relative  = transform_sample_counts(physeq, function(OTU) OTU / sum(OTU))
+
+#Visually inspect
+#Barplot of top 25 OTUs
+Top25OTUs = names(sort(taxa_sums(relative), TRUE)[1:25])
+comparetop25 = prune_taxa(Top25OTUs, relative)
+plot_bar(comparetop25, fill = "MetaCyc_pathway", title = "Functional Profile by Sample")
+
+###################### ORDINATION #########################
+#Ordination plots of microbiomes 
+#Scale
+set.seed(42)
+#bat.rare = rarefy_even_depth(physeq, sample.size = 1968)
+
+#Hellinger transform the data (don't rarefy)
+require(microbiome)
+physeq.trans<-transform(x = physeq, transform = "hellinger", target = "OTU", shift = 0, scale = 1)
+physeq.trans<-subset_samples(physeq = physeq.trans, Binary!="Control")
+physeq.sub<-subset_samples(physeq = physeq, Binary!="Control")
+
+funx.ord <- ordinate(
+  physeq = physeq.trans, 
+  method = "PCoA", 
+  distance = "bray"
+)
+
+# Calculate distance matrix
+study.bray <- phyloseq::distance(physeq.trans, method = "bray")
+
+# make a data frame from the sample_data
+sampledf <- data.frame(sample_data(physeq.trans))
+sampledf$SampleID<-row.names(sampledf)
+
+#Basic sample size stats
+require(dplyr)
+sampledf %>%
+  group_by(FeedingNiche) %>%
+  summarise(n_distinct(SampleID))
+
+sampledf %>%
+  group_by(Binary) %>%
+  summarise(n_distinct(SampleID))
+
+Zissou<- c( "#F98400","#00A08A","#F2AD00", "#5BBCD6", "purple", "darkred")
+#Zissou2<- wes_palette("Darjeeling1", 6, type = "continuous")
+pdf(file = "Hellinger-funx-PCOA_REVISED.pdf", width = 7, height = 5)
+plot_ordination(
+  physeq = physeq.trans,
+  ordination = funx.ord,
+  axes = c(1,2), 
+  color = "FeedingNiche") +
+  scale_color_viridis_d(option="plasma", direction = -1)+
+  geom_point(aes(color = FeedingNiche), size = 1.0) +
+  theme_bw() +
+  stat_ellipse() + geom_jitter()
+dev.off()
+
+# Adonis test
+#install.packages("remotes")
+#remotes::install_github("GuillemSalazar/EcolUtils")
+library(EcolUtils)
+sampledf$FeedingNiche<-as.factor(sampledf$FeedingNiche)
+sampledf$Binary<-as.factor(sampledf$Binary)
+
+#Add study to sample metadata for PERMANOVA
+write.csv(sampledf, file = "Sample_data.csv")
+sampledf<-read.csv(file = "Sample_data.csv", row.names = 1)
+
+adonis(study.bray ~ FeedingNiche * HostSpecies + HostGenus + HostFamily, data = sampledf) #F = 8.6712, r2 = 0.06251, p = 0.001 *** 
+#               Df SumsOfSqs  MeanSqs F.Model  R2      Pr(>F)    
+#FeedingNiche   5    0.6501  0.130023  8.6712 0.06251  0.001 ***
+#  HostSpecies  55   2.4923  0.045315  3.0221 0.23965  0.001 ***
+#  Residuals    484  7.2575  0.014995         0.69784           
+#Total          544  10.3999                  1.00000        
+
+adonis(study.bray ~ Binary * HostSpecies + HostGenus + HostFamily, data = sampledf) #F = 9.2791, r2 = 0.02676, P = 0.001 ***
+
+#                Df SumsOfSqs  MeanSqs  F.Model      R2   Pr(>F)    
+#CoarseNiche      2    0.2783  0.139138  9.2791 0.02676  0.001 ***
+#  HostSpecies    58   2.8642  0.049382  3.2933 0.27540  0.001 ***
+#  Residuals      484  7.2575  0.014995         0.69784           
+#Total            544  10.3999                  1.00000
+
+p.full<- c(0.001, 0.001, 0.001, 0.001)
+p.adjust(p.full, method = "BH", n = length(p.full))
+
+adonis_res<-adonis.pair(study.bray, sampledf$FeedingNiche, nper = 1000, corr.method = "fdr")
+write.table(x = adonis_res, file = "permanova_dietniche.csv", sep = ",")
+beta <- betadisper(study.bray, sampledf$FeedingNiche)
+permutest(beta) #p = 0.048
+
+adonis(study.bray ~ Study, data = sampledf)
+
+#microbiome functions are significant but weakly different.
+#this is probably due to large proportion of shared "housekeeping" functions
+#Let's explore the enrichment among groups using ANCOM in QIIME2.
+#ANCOM differences are too many, likely violates assumptions so have to use LEfSe
+
+################### HOST PHYLOGENY #####################
+#This is a trimmed host phylogeny from VertLife (Upham et al. 2019)
+library(phytools)
+trees<-read.nexus("~/Documents/BigBatProj/tree-pruner-7beec7de-2578-4bce-b87b-1e80d044f018/output.nex")
+#rf.tree<-averageTree(trees,method="branch.score.difference")
+tree_6237<-trees$tree_9764
+plotTree(tree_6237, node.numbers = F)
+
+foo<-function(tree,...){
+  fsize<-36*par()$pin[2]/par()$pin[1]/Ntip(tree)
+  plotTree(tree,fsize=fsize,lwd=1,...)
+}
+
+foo(tree = tree_6237, n=60, type = 'fan')
+treedata<-read.csv(file = "treedata.csv", header = T, row.names = 1)
+
+p <- ggtree(tree_6237, layout = 'fan') %<+% treedata
+
+
+p1 <- gheatmap(p, treedata, offset=.8, width=.1,
+               colnames_angle=95, colnames_offset_y = .25) + scale_fill_viridis_d(option="plasma") + geom_tiplab(offset = 3, size = 2)
+pdf(file = "speciestree.pdf", width = 10, height = 8)
+p1
+dev.off()
+
+#compute patristic distance matrix for MRMs
+library(ape)
+PatristicDistMatrix<-cophenetic(tree_6237)
+
+############# Merge functions by host species, correct tip labs to fit tree 
+#First transform to factors all sample data
+# Transform all variables to factors just in case...
+df <- as.data.frame(lapply(sample_data(bat.rare),function (y) if(class(y)!="factor" ) as.factor(y) else y),stringsAsFactors=T)
+row.names(df) <- sample_names(bat.rare)
+sample_data(bat.rare) <- sample_data(df)
+#drop controls (not useful here)
+subs.rare<-subset_samples(physeq = bat.rare, Binary!="Control")
+subs.physeq<-subset_samples(physeq = physeq, Binary!="Control")
+#now merge
+mergedspp = merge_samples(subs.rare, "HostSpecies")
+SD = merge_samples(sample_data(subs.rare), "HostSpecies")
+print(SD[, "HostSpecies"])
+relative.merge<- transform_sample_counts(mergedspp, function(OTU) OTU / sum(OTU))
+
+#visually inspect to make sure merge worked
+Top100OTUs = names(sort(taxa_sums(relative.merge), TRUE)[1:100])
+comparetop100 = prune_taxa(Top100OTUs, relative.merge)
+plot_bar(comparetop100, fill = "MetaCyc_pathway", title = "Functional Profile by Host Species")
+
+#compute Bray Curtis distance matrix on merged dataset (drop control first)
+merged.bray.fun<-phyloseq::distance(mergedspp, method = "bray")
+writemydf<-as.data.frame(as.matrix(merged.bray.fun))
+write.csv(writemydf,file = "batsppdists.csv")
+
+funx.ord <- ordinate(
+  physeq = mergedspp, 
+  method = "CCA", 
+  distance = "bray"
+)
+
+mergedspp@sam_data$Binary<-as.factor(mergedspp@sam_data$Binary)
+mergedspp@sam_data$FeedingNiche<-as.factor(mergedspp@sam_data$FeedingNiche)
+
+plot_ordination(
+  physeq = mergedspp,
+  ordination = funx.ord,
+  axes = c(1,2), 
+  color = "Binary", 
+  title = "Ordination of Metagenome Functions") +
+  scale_color_viridis_d(option = "viridis") +
+  geom_point(aes(color = Binary), size = 2.5) +
+  theme_bw() +
+  stat_ellipse() + 
+  geom_point() + geom_jitter() + geom_text(aes(label=rownames(mergedspp@sam_data)), size = 2, hjust=0, vjust=0)
+
+####################COMPARE LOG FOLD ENRICHMENT IN FUNCTION
+#Implement DESEQ2: This pipeline fits neg binomial model to normalize data
+#This will make for a good comparison to the ANCOM results
+#convert to DEseq format
+require(DESeq2)
+subs.physeq@sam_data$SampleID<-rownames(subs.physeq@sam_data)
+#Set the Insectivores as the reference sample class
+subs.physeq@sam_data$Binary<-as.factor(subs.physeq@sam_data$Binary)
+sample_data(subs.physeq)$Binary <- relevel(sample_data(subs.physeq)$Binary, "Animal_feeder")
+fun.dds = phyloseq_to_deseq2(subs.physeq, ~ Binary)
+
+#Get rid of zeros which will cause DESeq to fail
+cts = counts(fun.dds)
+geoMeans = apply(cts, 1, function(row) if (all(row == 0)) 0 else exp(mean(log(row[row != 0]))))
+trans.fundds = estimateSizeFactors(fun.dds, geoMeans=geoMeans)
+
+#Now use DESeq
+fun.dds = DESeq(trans.fundds, test="Wald", fitType="parametric")
+
+#EXPLORE RESULTS
+res = results(fun.dds, cooksCutoff = FALSE)
+mcols(res, use.names=TRUE)
+alpha = 0.00001
+sigtab1 = res[which(res$padj < alpha), ]
+sigtab1 = cbind(as(sigtab1, "data.frame"), as(tax_table(subs.physeq)[rownames(sigtab1), ], "matrix"))
+head(sigtab1)
+# sort by padj
+new.sigtab <- sigtab1[order(sigtab1$padj),]
+write.csv(new.sigtab, file = "sigtab.csv")
+
+#Let's see which functions vary
+library("ggplot2")
+x = tapply(sigtab1$log2FoldChange, sigtab1$MetaCyc_pathway, function(x) max(x))
+x = sort(x, TRUE)
+sigtab1$MetaCyc_pathway = factor(as.character(sigtab1$MetaCyc_pathway), levels=names(x))
+
+ggplot(sigtab1, aes(x=MetaCyc_pathway, y=log2FoldChange)) + geom_point(size=6) + 
+  theme(axis.text.x = element_text(angle = -90, hjust = 0, vjust=0.5)) 
+
+# Extract transformed values & heatmap
+require(DESeq2)
+vsd <- varianceStabilizingTransformation(fun.dds, blind= FALSE)
+
+#Heatmap of count matrix
+library("genefilter")
+library(pheatmap)
+select <- rownames(sigtab1)
+nt <- normTransform(fun.dds) # defaults to log2(x+1)
+log2.norm.counts <- assay(nt)[select, ]
+df <- as.data.frame(colData(fun.dds)[,c("Binary", "NewOld")])
+
+pheatmap::pheatmap(log2.norm.counts, annotation_col=df, main="log2(counts + 1)", cluster_cols = TRUE, clustering_method = "average",
+                   fontsize_col = 1)
+
+#Heatmap of sample-to-sample dists
+sampleDists <- dist(t(assay(vsd)))
+
+library("RColorBrewer")
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- paste(vsd$Binary, vsd$FeedingNiche, sep="-")
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         col=colors)
+#PCA plot
+PCA<-plotPCA(vsd, intgroup = "Binary") + stat_ellipse() + theme_bw() + geom_point() 
+plot(PCA)
+
+
+######################## TAXONOMIC COMPOSITIONS #######################
+#Work in progress
+#Import the BIOM file, tree, mapping file
+dat2 <- read_biom(biom_file = "~/Downloads/feature-table.biom")
+otu_table2 <- as.data.frame(as.matrix(biom_data(dat2)))
+taxonomy2 <- read.delim(file = "~/Documents/BigBatProj/merged-corrected-taxonomy.txt")
+metadata2 <- sample_metadata(dat2)
+
+#Import to phyloseq obj
+SAM2<-sample_data(metadata2)
+TAX2<-tax_table(as.matrix(taxonomy2))
+OTU2<- otu_table(otu_table2, taxa_are_rows=TRUE)
+physeq_tax<-merge_phyloseq(OTU2, SAM2, TAX2)
+
+#Relative abundance
+#Calculate Relative Abundance
+relative  = transform_sample_counts(physeq, function(OTU) OTU / sum(OTU))
+
+#Visually inspect
+#Barplot of top 25 OTUs
+Top25OTUs = names(sort(taxa_sums(relative), TRUE)[1:25])
+comparetop25 = prune_taxa(Top25OTUs, relative)
+plot_bar(comparetop25, fill = "MetaCyc_pathway", title = "Functional Profile by Sample")
+
